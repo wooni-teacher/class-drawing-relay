@@ -410,6 +410,12 @@ function renderPlayer(state){
   if(state.status === "drawing") return renderDrawingScreen(state, false);
   if(state.status === "round_end") return renderRoundEnd(state, false);
   if(state.status === "game_end") return renderGameEnd(state, false);
+  app.innerHTML = `
+    <div class="dr-card dr-center">
+      <div class="dr-h2">⏳ 잠시만 기다려주세요</div>
+      <div class="dr-small">선생님이 게임을 새로 준비하고 있어요.</div>
+    </div>
+  `;
 }
 
 function renderJoinForm(state){
@@ -810,6 +816,18 @@ async function renderHost(state){
   if(state.status === "drawing") return renderDrawingScreen(state, true);
   if(state.status === "round_end") return renderRoundEnd(state, true);
   if(state.status === "game_end") return renderGameEnd(state, true);
+  // 인식할 수 없는(예: 예전 버전의) 상태값 - 복구 화면 표시
+  app.innerHTML = `
+    <div class="dr-card dr-center">
+      <div class="dr-h2">⚠️ 이전 게임 데이터가 남아있어요</div>
+      <div class="dr-small">코드가 업데이트되면서 예전 형식의 데이터와 맞지 않게 됐어요.<br>아래 버튼으로 새로 시작해주세요.</div>
+      <button class="dr-btn yellow" id="dr-recover-btn" style="margin-top:12px;">🔄 새 게임 만들기</button>
+    </div>
+  `;
+  document.getElementById("dr-recover-btn").onclick = async ()=>{
+    resetHostLocalSettings();
+    await hostCreateLobby();
+  };
 }
 
 function rosterChipsHtml(roster){
