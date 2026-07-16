@@ -141,7 +141,6 @@ const firebaseConfig = {
 
 const CANVAS_W = 600, CANVAS_H = 400;
 const DEFAULT_TURN_SEC = 35;
-const DEFAULT_ROUNDS = 10;
 const DEFAULT_COLLECT_MIN = 5;
 const MAX_WORDS_PER_PLAYER = 5;
 const COLORS = ["#17233F","#FF7A6B","#FFD166","#2FBF8F","#2AA8C4","#4C7EFF","#F28C28","#8B5E3C"];
@@ -182,7 +181,6 @@ let myWords = [];
 let creatingLobby = false;
 
 // host-only local (not synced) lobby settings
-let roundsSetting = DEFAULT_ROUNDS;
 let turnSeconds = DEFAULT_TURN_SEC;
 let collectMinutes = DEFAULT_COLLECT_MIN;
 let topicsList = [];
@@ -279,17 +277,18 @@ function blankDataURL(){
 
 async function hostCreateLobby(){
   const gid = newGameId();
-  const s = { gameId: gid, status:"lobby", rounds: DEFAULT_ROUNDS, turnOrder:[], turnIndex:0, turnStartTime:0,
+  const s = { gameId: gid, status:"lobby", roundNumber:1, turnOrder:[], turnIndex:0, turnStartTime:0,
     turnDurationMs: DEFAULT_TURN_SEC*1000, collectDurationMs: DEFAULT_COLLECT_MIN*60000, collectStartTime:0,
     prompt:"", theme:"" };
   try{ await db.ref("session/players").remove(); }catch(e){}
   try{ await db.ref("session/canvas").remove(); }catch(e){}
   try{ await db.ref("session/words").remove(); }catch(e){}
+  try{ await db.ref("session/rounds").remove(); }catch(e){}
   await setState(s);
   return s;
 }
 function resetHostLocalSettings(){
-  roundsSetting = DEFAULT_ROUNDS; turnSeconds = DEFAULT_TURN_SEC; collectMinutes = DEFAULT_COLLECT_MIN;
+  turnSeconds = DEFAULT_TURN_SEC; collectMinutes = DEFAULT_COLLECT_MIN;
   topicsList = []; chosenTheme = null; wheelSpinning = false;
 }
 
@@ -317,7 +316,7 @@ async function finalizeCollecting(state){
   });
   const sorted = Object.keys(freq).sort((a,b)=> freq[b]-freq[a]);
   topicsList = sorted.slice(0,10);
-  const ns = Object.assign({}, state, {status:"topics"});
+  const ns = Object.assign({}, state, {status:"topics", roundNumber: state.roundNumber || 1});
   await setState(ns);
   finalizingWords = false;
   render(ns);
@@ -326,16 +325,26 @@ async function finalizeCollecting(state){
 async function hostStart(state){
   const roster = await getRoster(state.gameId);
   const shuffled = shuffle(roster.slice());
-  const n = Math.min(state.rounds || DEFAULT_ROUNDS, shuffled.length);
-  const chosen = shuffled.slice(0, n).sort((a,b)=>a.joinedAt - b.joinedAt);
-  state.turnOrder = chosen.map(p=>({id:p.id, name:p.name}));
+  state.turnOrder = shuffled.map(p=>({id:p.id, name:p.name}));
   state.turnIndex = 0;
   state.turnStartTime = Date.now();
   state.status = "drawing";
   state.prompt = randomPrompt();
   state.theme = chosenTheme || "";
+  state.roundNumber = state.roundNumber || 1;
+  topicsList = topicsList.filter(t => t !== chosenTheme);
   try{ await setCanvas(state.gameId, blankDataURL()); }catch(e){}
   await setState(state);
+}
+
+async function saveRoundRecord(gid, roundNumber, record){
+  try{ await db.ref("session/rounds/" + gid + "/" + roundNumber).set(record); }catch(e){}
+}
+async function getRoundsHistory(gid){
+  try{
+    const snap = await db.ref("session/rounds/" + gid).get();
+    return snap.exists() ? snap.val() : {};
+  }catch(e){ return {}; }
 }
 
 async function advanceTurn(state, savedDataURL){
@@ -344,7 +353,13 @@ async function advanceTurn(state, savedDataURL){
     try{ await setCanvas(state.gameId, savedDataURL); }catch(e){}
   }
   if(state.turnIndex + 1 >= state.turnOrder.length){
-    next.status = "end";
+    next.status = "round_end";
+    const finalImg = savedDataURL || (await getCanvas(state.gameId)) || "";
+    await saveRoundRecord(state.gameId, state.roundNumber || 1, {
+      theme: state.theme || "",
+      image: finalImg,
+      contributors: state.turnOrder.map(p=>p.name)
+    });
   }else{
     next.turnIndex = state.turnIndex + 1;
     next.turnStartTime = Date.now();
@@ -393,7 +408,8 @@ function renderPlayer(state){
   if(state.status === "collecting") return renderPlayerCollecting(state);
   if(state.status === "topics") return renderPlayerTopicsWait(state);
   if(state.status === "drawing") return renderDrawingScreen(state, false);
-  if(state.status === "end") return renderEndScreen(state);
+  if(state.status === "round_end") return renderRoundEnd(state, false);
+  if(state.status === "game_end") return renderGameEnd(state, false);
 }
 
 function renderJoinForm(state){
@@ -505,11 +521,12 @@ function renderPlayerCollecting(state){
 }
 
 function renderPlayerTopicsWait(state){
+  const roundNum = state.roundNumber || 1;
   app.innerHTML = `
     <div class="dr-h1">🎨 협동 그림 릴레이</div>
     <div class="dr-card dr-center">
       <div style="font-size:40px;">🎡</div>
-      <div class="dr-h2">선생님이 오늘의 주제를 정하고 있어요!</div>
+      <div class="dr-h2">선생님이 ${roundNum}라운드 주제를 정하고 있어요!</div>
       <div class="dr-sub" style="margin-bottom:0;">잠시만 기다려주세요...</div>
     </div>
   `;
@@ -522,7 +539,7 @@ async function renderDrawingScreen(state, isHost){
   const left = timeLeftMs(state);
   const dur = state.turnDurationMs || DEFAULT_TURN_SEC*1000;
   const pct = Math.round((left/dur)*100);
-  const themeBanner = state.theme ? `<div class="dr-theme-banner">🎯 오늘의 주제: ${esc(state.theme)}</div>` : "";
+  const themeBanner = state.theme ? `<div class="dr-theme-banner">🎯 ${state.roundNumber||1}라운드 주제: ${esc(state.theme)}</div>` : "";
 
   let orderChips = state.turnOrder.map((p,i)=>{
     let cls = "dr-chip";
@@ -686,21 +703,71 @@ async function finishTurn(state){
   finishing = false;
 }
 
-async function renderEndScreen(state){
+async function renderRoundEnd(state, isHost){
   let imgSrc = null;
   try{ imgSrc = await getCanvas(state.gameId); }catch(e){}
   const contributors = state.turnOrder.map(p=>`<span class="dr-chip">${esc(p.name)}</span>`).join("");
+  const roundNum = state.roundNumber || 1;
+  const hasMoreTopics = isHost && topicsList.length > 0;
   app.innerHTML = `
-    <div class="dr-winner-banner">🎉 우리 반 협동 작품 완성!</div>
-    ${state.theme ? `<div class="dr-theme-banner">🎯 오늘의 주제: ${esc(state.theme)}</div>` : ""}
+    <div class="dr-winner-banner">🎉 ${roundNum}라운드 작품 완성!</div>
+    ${state.theme ? `<div class="dr-theme-banner">🎯 이번 주제: ${esc(state.theme)}</div>` : ""}
     <img class="dr-final-img" src="${imgSrc || ''}" />
     <div class="dr-card dr-center">
       <div class="dr-h2" style="font-size:16px;">함께 그린 친구들</div>
       <div class="dr-contrib">${contributors}</div>
-      <a class="dr-btn yellow" style="text-decoration:none; margin-top:14px;" href="${imgSrc || '#'}" download="우리반_협동그림.png">🖼️ 그림 다운로드</a>
+      <a class="dr-btn yellow" style="text-decoration:none; margin-top:14px;" href="${imgSrc || '#'}" download="우리반_협동그림_${roundNum}라운드.png">🖼️ 이 라운드 그림 다운로드</a>
     </div>
+    ${isHost ? `
+    <div class="dr-card dr-center">
+      <div class="dr-small" style="margin-bottom:10px;">남은 주제: ${topicsList.length}개</div>
+      <button class="dr-btn yellow" id="dr-next-round-btn" ${topicsList.length===0?"disabled":""}>➡️ 다음 라운드 시작하기</button>
+      <button class="dr-btn outline" id="dr-finish-game-btn">🏁 여기서 전체 게임 종료</button>
+    </div>
+    ` : `<div class="dr-small dr-center">선생님이 다음 라운드를 준비하고 있어요...</div>`}
+  `;
+  if(isHost){
+    document.getElementById("dr-next-round-btn").onclick = async ()=>{
+      if(topicsList.length === 0){ alert("남은 주제가 없어요!"); return; }
+      chosenTheme = null;
+      const ns = Object.assign({}, state, { status:"topics", roundNumber: (state.roundNumber||1) + 1 });
+      await setState(ns);
+    };
+    document.getElementById("dr-finish-game-btn").onclick = async ()=>{
+      const ns = Object.assign({}, state, { status:"game_end" });
+      await setState(ns);
+    };
+  }
+  fireConfetti();
+}
+
+async function renderGameEnd(state, isHost){
+  const history = await getRoundsHistory(state.gameId);
+  const roundNums = Object.keys(history).map(n=>parseInt(n,10)).sort((a,b)=>a-b);
+  const galleryHtml = roundNums.map(n=>{
+    const r = history[n] || {};
+    return `
+      <div class="dr-card">
+        <div class="dr-h2" style="font-size:16px;">${n}라운드 · ${esc(r.theme||"")}</div>
+        <img class="dr-final-img" src="${r.image||''}" />
+        <div class="dr-contrib">${(r.contributors||[]).map(nm=>`<span class="dr-chip">${esc(nm)}</span>`).join("")}</div>
+        <a class="dr-btn outline small" style="text-decoration:none; margin-top:8px; display:inline-block;" href="${r.image||'#'}" download="우리반_협동그림_${n}라운드.png">🖼️ 다운로드</a>
+      </div>
+    `;
+  }).join("");
+  app.innerHTML = `
+    <div class="dr-winner-banner">🏆 모든 라운드 완료! 우리 반 협동 작품집</div>
+    ${galleryHtml || '<div class="dr-small dr-center">완성된 작품이 없어요</div>'}
+    ${isHost ? `<div class="dr-card dr-center"><button class="dr-btn yellow" id="dr-new-game-btn">🔄 새 게임 만들기</button></div>` : ""}
     <div class="dr-small dr-center" style="margin-top:6px;">모두 수고했어요! 즐거운 방학 되세요 🎈</div>
   `;
+  if(isHost){
+    document.getElementById("dr-new-game-btn").onclick = async ()=>{
+      if(!confirm("새 게임을 시작하면 지금까지의 참가자·작품 기록이 모두 초기화돼요. 계속할까요?")) return;
+      resetHostLocalSettings();
+      await hostCreateLobby();
+    };
+  }
   fireConfetti();
 }
 
@@ -741,7 +808,8 @@ async function renderHost(state){
   if(state.status === "collecting") return renderHostCollecting(state);
   if(state.status === "topics") return renderHostTopics(state);
   if(state.status === "drawing") return renderDrawingScreen(state, true);
-  if(state.status === "end") return renderEndScreen(state);
+  if(state.status === "round_end") return renderRoundEnd(state, true);
+  if(state.status === "game_end") return renderGameEnd(state, true);
 }
 
 function rosterChipsHtml(roster){
@@ -758,12 +826,11 @@ function renderHostLobbyInitial(state){
     </div>
     <div class="dr-card">
       <div class="dr-h2" style="font-size:16px;">⚙️ 게임 설정</div>
-      <label class="dr-label">🔁 라운드 수 (최대 10명이 그려요, 참가자가 더 많으면 무작위로 뽑아요)</label>
-      <input type="number" class="dr-input" id="dr-rounds-input" min="2" max="10" value="${roundsSetting}" />
       <label class="dr-label">⏱️ 1인당 그리는 시간 (초, 10~120)</label>
       <input type="number" class="dr-input" id="dr-duration-input" min="10" max="120" value="${turnSeconds}" />
       <label class="dr-label">🧩 추억 조각모음 시간 (분, 5~10)</label>
       <input type="number" class="dr-input" id="dr-collectmin-input" min="5" max="10" value="${collectMinutes}" />
+      <div class="dr-small">💡 추억 조각모음에서 뽑힌 상위 단어(최대 10개)가 라운드별 주제가 돼요. 한 라운드가 끝나면 다음 라운드로 이어서 진행할 수 있어요.</div>
     </div>
     <div class="dr-card dr-center">
       <button class="dr-btn yellow" id="dr-start-collect-btn" disabled>🧩 추억 조각모음 시작하기</button>
@@ -778,11 +845,9 @@ function renderHostLobbyInitial(state){
     if(countEl) countEl.textContent = roster.length;
     if(btn) btn.disabled = roster.length === 0;
   });
-  document.getElementById("dr-rounds-input").oninput = (e)=>{ const v=parseInt(e.target.value,10); if(!isNaN(v)) roundsSetting = v; };
   document.getElementById("dr-duration-input").oninput = (e)=>{ const v=parseInt(e.target.value,10); if(!isNaN(v)) turnSeconds = v; };
   document.getElementById("dr-collectmin-input").oninput = (e)=>{ const v=parseInt(e.target.value,10); if(!isNaN(v)) collectMinutes = v; };
   document.getElementById("dr-start-collect-btn").onclick = async ()=>{
-    state.rounds = Math.max(2, Math.min(10, roundsSetting || DEFAULT_ROUNDS));
     state.turnDurationMs = Math.max(10, Math.min(120, turnSeconds || DEFAULT_TURN_SEC)) * 1000;
     state.collectDurationMs = Math.max(5, Math.min(10, collectMinutes || DEFAULT_COLLECT_MIN)) * 60000;
     state.collectStartTime = Date.now();
@@ -932,12 +997,13 @@ function updateStartButtonState(){
 }
 
 function renderHostTopics(state){
+  const roundNum = state.roundNumber || 1;
   app.innerHTML = `
     <div class="dr-h1">🎨 협동 그림 릴레이</div>
-    <div class="dr-sub">선생님 진행 화면 · 총 ${state.rounds}라운드 · ${Math.round((state.turnDurationMs||DEFAULT_TURN_SEC*1000)/1000)}초/명</div>
+    <div class="dr-sub">선생님 진행 화면 · ${roundNum}라운드 · ${Math.round((state.turnDurationMs||DEFAULT_TURN_SEC*1000)/1000)}초/명</div>
     <div class="dr-card">
-      <div class="dr-h2" style="font-size:16px;">🎯 오늘의 주제 정하기</div>
-      <div class="dr-small dr-center" style="margin-bottom:10px;">추억 조각모음에서 많이 나온 단어들이 자동으로 담겼어요. 직접 추가/삭제도 가능해요.</div>
+      <div class="dr-h2" style="font-size:16px;">🎯 ${roundNum}라운드 주제 정하기</div>
+      <div class="dr-small dr-center" style="margin-bottom:10px;">추억 조각모음에서 많이 나온 단어 중 아직 안 쓴 단어들이에요. 직접 추가/삭제도 가능해요.</div>
       <div style="display:flex; gap:8px; margin-bottom:12px;">
         <input class="dr-input" id="dr-topic-input" placeholder="주제 직접 추가" style="margin-bottom:0;" />
         <button class="dr-btn small yellow" id="dr-topic-add-btn">추가</button>
@@ -948,7 +1014,7 @@ function renderHostTopics(state){
       <div id="dr-theme-result" class="dr-center">${chosenTheme ? themeResultHtml() : ""}</div>
     </div>
     <div class="dr-card dr-center">
-      <button class="dr-btn yellow" id="dr-start-btn" ${!chosenTheme?"disabled":""}>🚀 게임 시작하기</button>
+      <button class="dr-btn yellow" id="dr-start-btn" ${!chosenTheme?"disabled":""}>🚀 ${roundNum}라운드 시작하기</button>
     </div>
   `;
   document.getElementById("dr-topic-add-btn").onclick = addTopicFromInput;
