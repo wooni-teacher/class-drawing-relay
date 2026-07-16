@@ -122,6 +122,7 @@ body{
 <!-- Firebase SDK (compat) -->
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
 <!-- Firebase 프로젝트 설정 -->
 <script>
 const firebaseConfig = {
@@ -959,13 +960,13 @@ function renderHostTopics(state){
 }
 
 // ---------- BOOT ----------
-function boot(){
+async function boot(){
   const missing = (typeof firebaseConfig === "undefined") || !firebaseConfig || firebaseConfig.apiKey === "YOUR_API_KEY_HERE";
   if(missing){
     app.innerHTML = `
       <div class="dr-card dr-center">
         <div class="dr-h2">⚠️ Firebase 설정이 필요해요</div>
-        <div class="dr-small">firebase-config.js 파일을 열어 본인의 Firebase 프로젝트 설정 값을 입력한 뒤 새로고침 해주세요.<br>자세한 방법은 README.md를 참고하세요.</div>
+        <div class="dr-small">index.html 안의 firebaseConfig 값을 확인해주세요.</div>
       </div>
     `;
     return;
@@ -974,6 +975,16 @@ function boot(){
     initFirebaseApp();
   }catch(e){
     app.innerHTML = `<div class="dr-card dr-center"><div class="dr-h2">⚠️ Firebase 초기화 오류</div><div class="dr-small">${esc(String(e))}</div></div>`;
+    return;
+  }
+  try{
+    await firebase.auth().signInAnonymously();
+  }catch(e){
+    showFatalError(
+      "로그인 오류",
+      "익명 로그인에 실패했어요.\n\n오류 메시지: " + (e && e.message ? e.message : String(e)) +
+      "\n\n확인해볼 것:\nFirebase 콘솔 > Authentication > Sign-in method 에서 '익명(Anonymous)' 로그인이 사용 설정되어 있는지 확인해주세요."
+    );
     return;
   }
   render(null);
