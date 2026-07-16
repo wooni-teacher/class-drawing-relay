@@ -216,10 +216,27 @@ async function setState(s){
   await db.ref("session/state").set(s);
   return s;
 }
+function showFatalError(title, detail){
+  app.innerHTML = `
+    <div class="dr-card dr-center">
+      <div class="dr-h2">⚠️ ${esc(title)}</div>
+      <div class="dr-small" style="text-align:left; white-space:pre-line;">${esc(detail)}</div>
+    </div>
+  `;
+}
 function subscribeState(cb){
   if(stateRef) stateRef.off();
   stateRef = db.ref("session/state");
-  stateRef.on("value", (snap)=>{ cb(snap.exists() ? snap.val() : null); });
+  stateRef.on("value",
+    (snap)=>{ cb(snap.exists() ? snap.val() : null); },
+    (err)=>{
+      showFatalError(
+        "데이터베이스 접근 오류",
+        "Realtime Database에 연결하지 못했어요.\n\n오류 메시지: " + err.message +
+        "\n\n확인해볼 것:\n1) Firebase 콘솔에서 Realtime Database를 활성화했는지\n2) 규칙(Rules) 탭에 database.rules.json 내용을 게시했는지\n3) databaseURL 지역(asia-southeast1 등)이 실제 만든 위치와 일치하는지"
+      );
+    }
+  );
 }
 function newGameId(){ return "g" + Date.now(); }
 
@@ -705,7 +722,17 @@ async function renderHost(state){
   if(!state){
     if(creatingLobby) return;
     creatingLobby = true;
-    await hostCreateLobby();
+    try{
+      await hostCreateLobby();
+    }catch(e){
+      creatingLobby = false;
+      showFatalError(
+        "게임 생성 오류",
+        "새 게임 방을 만들지 못했어요.\n\n오류 메시지: " + (e && e.message ? e.message : String(e)) +
+        "\n\n확인해볼 것:\n1) Firebase 콘솔에서 Realtime Database를 활성화했는지\n2) 규칙(Rules) 탭에 database.rules.json 내용을 게시했는지"
+      );
+      return;
+    }
     creatingLobby = false;
     return; // the write triggers subscribeState callback again with real data
   }
